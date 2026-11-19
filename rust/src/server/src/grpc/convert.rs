@@ -96,25 +96,32 @@ pub fn to_text_request(
     let response = req.response.as_ref();
     let kv = req.kv.as_ref();
 
-    // A prost getter maps an unknown nonzero enum value back to Unspecified;
-    // validate the raw field so such a client error is rejected instead of
-    // silently taking the legacy fallback.
     if let Some(options) = response {
-        if pb::OutputMode::try_from(options.output_mode).is_err() {
-            return Err(Status::invalid_argument(format!(
+        // Validate the raw value: prost getters map unknown enums to Unspecified.
+        let mode = pb::OutputMode::try_from(options.output_mode).map_err(|_| {
+            Status::invalid_argument(format!(
                 "unknown output_mode value: {}",
                 options.output_mode
-            )));
+            ))
+        })?;
+        match (mode, options.output_text) {
+            (pb::OutputMode::Derender, _) => {
+                return Err(Status::unimplemented(
+                    "output_mode derender is not implemented yet",
+                ));
+            }
+            (pb::OutputMode::Text, Some(false)) => {
+                return Err(Status::invalid_argument(
+                    "output_mode text conflicts with output_text=false",
+                ));
+            }
+            (pb::OutputMode::Tokens, Some(true)) => {
+                return Err(Status::invalid_argument(
+                    "output_mode tokens conflicts with output_text=true",
+                ));
+            }
+            _ => {}
         }
-    }
-
-    // Worker-side derendering (structured content, reasoning, and tool-call
-    // deltas from the decode worker) is not implemented yet; reject it instead
-    // of silently falling back to raw text.
-    if response.is_some_and(|options| options.output_mode() == pb::OutputMode::Derender) {
-        return Err(Status::unimplemented(
-            "output_mode derender is not implemented yet",
-        ));
     }
 
     let mut sampling_params =
@@ -140,12 +147,17 @@ pub fn to_text_request(
         }
     }
 
-    let detokenize = ResponseOpts::from_proto(response).output_text;
+    let stop_strings = stopping.map(|s| &s.stop_strings).filter(|ss| !ss.is_empty()).cloned();
+    // Like HTTP tokens mode, decode internally for stop strings without emitting text.
+    // Preserve the legacy output_text=false behavior when the mode is unspecified.
+    let detokenize = ResponseOpts::from_proto(response).output_text
+        || (response.is_some_and(|options| options.output_mode() == pb::OutputMode::Tokens)
+            && stop_strings.is_some());
 
     let decode_options = TextDecodeOptions {
         skip_special_tokens: response.and_then(|options| options.skip_special_tokens),
         include_stop_str_in_output: stopping.is_some_and(|s| s.include_stop_strings),
-        stop_strings: stopping.map(|s| &s.stop_strings).filter(|ss| !ss.is_empty()).cloned(),
+        stop_strings,
         min_tokens: stopping.map_or(0, |s| s.min_new_tokens),
         detokenize,
     };
@@ -668,34 +680,8 @@ mod tests {
     }
 
     #[test]
-    fn grpc_output_mode_derender_is_rejected_as_unimplemented() {
-        let request = pb::GenerateRequest {
-            response: Some(pb::ResponseOptions {
-                output_mode: pb::OutputMode::Derender as i32,
-                ..Default::default()
-            }),
-            ..base_request()
-        };
-        let err = to_text_request(request, false, &served()).unwrap_err();
-        assert_eq!(err.code(), tonic::Code::Unimplemented);
-    }
-
-    #[test]
-    fn grpc_output_mode_unknown_value_is_rejected_as_invalid_argument() {
-        let request = pb::GenerateRequest {
-            response: Some(pb::ResponseOptions {
-                output_mode: 99,
-                ..Default::default()
-            }),
-            ..base_request()
-        };
-        let err = to_text_request(request, false, &served()).unwrap_err();
-        assert_eq!(err.code(), tonic::Code::InvalidArgument);
-    }
-
-    #[test]
-    fn grpc_output_mode_supersedes_legacy_output_text() {
-        // TOKENS maps to today's output_text = false behavior.
+    fn grpc_output_mode_selects_response_and_decode_options() {
+        // Without stop strings, TOKENS does not need detokenization.
         let request = pb::GenerateRequest {
             response: Some(pb::ResponseOptions {
                 output_mode: pb::OutputMode::Tokens as i32,
@@ -708,11 +694,11 @@ mod tests {
         let opts = ResponseOpts::from_proto(request.response.as_ref());
         assert!(!opts.output_text);
 
-        // Explicit TEXT keeps text output even alongside output_text = false.
+        // A matching explicit legacy flag is allowed.
         let request = pb::GenerateRequest {
             response: Some(pb::ResponseOptions {
                 output_mode: pb::OutputMode::Text as i32,
-                output_text: Some(false),
+                output_text: Some(true),
                 ..Default::default()
             }),
             ..base_request()

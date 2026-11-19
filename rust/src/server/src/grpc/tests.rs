@@ -857,15 +857,16 @@ async fn unary_generate_with_token_ids_prompt() {
     server_task.abort();
 }
 
-/// Explicit modes override the legacy text flag in both decoding and output.
+/// Valid explicit modes preserve the legacy default and select the response shape.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
-async fn generate_output_mode_precedence_for_both_rpcs() {
+async fn generate_output_modes_for_both_rpcs() {
     for (mode, legacy_text, output_token_ids, expected_text) in [
         (pb::OutputMode::Unspecified, Some(false), true, false),
         (pb::OutputMode::Unspecified, None, true, true),
-        (pb::OutputMode::Text, Some(false), false, true),
-        (pb::OutputMode::Tokens, Some(true), true, false),
+        (pb::OutputMode::Text, Some(true), false, true),
+        (pb::OutputMode::Text, None, true, true),
+        (pb::OutputMode::Tokens, Some(false), true, false),
         (pb::OutputMode::Tokens, None, false, false),
     ] {
         for streaming in [false, true] {
@@ -948,6 +949,56 @@ async fn generate_output_mode_precedence_for_both_rpcs() {
     }
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn generate_tokens_mode_matches_stop_strings_for_both_rpcs() {
+    for streaming in [false, true] {
+        let (mut client, server_task, engine_task) = grpc_test_server(
+            b"engine-grpc-token-mode-stop-string",
+            default_stream_output_specs(),
+        )
+        .await;
+        let outputs = generate_outputs(
+            &mut client,
+            pb::GenerateRequest {
+                prompt: Some(pb::generate_request::Prompt::TokenIds(pb::TokenIds {
+                    ids: vec![1, 2, 3],
+                })),
+                stopping: Some(pb::StoppingCriteria {
+                    stop_strings: vec!["i".to_string()],
+                    ..Default::default()
+                }),
+                response: Some(pb::ResponseOptions {
+                    output_mode: pb::OutputMode::Tokens as i32,
+                    output_text: Some(false),
+                    output_token_ids: true,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            streaming,
+        )
+        .await
+        .expect("generate with stop string");
+        assert!(outputs.iter().all(|output| output.text.is_empty()));
+        assert_eq!(
+            outputs
+                .iter()
+                .flat_map(|output| output.token_ids.iter().copied())
+                .collect::<Vec<_>>(),
+            [b'h' as u32, b'i' as u32],
+        );
+        let finish = outputs.last().and_then(|output| output.finish_info.as_ref()).unwrap();
+        assert_eq!(finish.num_output_tokens, 2);
+        assert_eq!(
+            finish.stop_reason,
+            Some(pb::finish_info::StopReason::StopString("i".to_string())),
+        );
+        engine_task.await.expect("mock engine task");
+        server_task.abort();
+    }
+}
+
 async fn generate_outputs(
     client: &mut InferenceClient<Channel>,
     request: pb::GenerateRequest,
@@ -968,10 +1019,11 @@ async fn generate_outputs(
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn generate_output_mode_on_tokenizerless_backend_for_both_rpcs() {
-    for mode in [
-        pb::OutputMode::Text,
-        pb::OutputMode::Tokens,
-        pb::OutputMode::Unspecified,
+    for (mode, stop_strings) in [
+        (pb::OutputMode::Text, vec![]),
+        (pb::OutputMode::Tokens, vec![]),
+        (pb::OutputMode::Tokens, vec!["i".to_string()]),
+        (pb::OutputMode::Unspecified, vec![]),
     ] {
         for streaming in [false, true] {
             let (inference_service, control_service, engine_health, engine_task) =
@@ -998,6 +1050,10 @@ async fn generate_output_mode_on_tokenizerless_backend_for_both_rpcs() {
                 prompt: Some(pb::generate_request::Prompt::TokenIds(pb::TokenIds {
                     ids: vec![1, 2, 3],
                 })),
+                stopping: Some(pb::StoppingCriteria {
+                    stop_strings: stop_strings.clone(),
+                    ..Default::default()
+                }),
                 response: Some(pb::ResponseOptions {
                     output_mode: mode as i32,
                     output_token_ids: mode != pb::OutputMode::Text,
@@ -1010,6 +1066,9 @@ async fn generate_output_mode_on_tokenizerless_backend_for_both_rpcs() {
                 let status = result.expect_err("explicit TEXT needs a tokenizer");
                 assert_eq!(status.code(), tonic::Code::InvalidArgument);
                 assert!(status.message().contains("requires a tokenizer"));
+            } else if !stop_strings.is_empty() {
+                let status = result.expect_err("string stopping needs a tokenizer");
+                assert_eq!(status.code(), tonic::Code::InvalidArgument);
             } else {
                 let outputs = result.expect("token output remains available");
                 assert!(outputs.iter().all(|output| output.text.is_empty()));
@@ -1031,16 +1090,21 @@ async fn generate_output_mode_on_tokenizerless_backend_for_both_rpcs() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn generate_output_mode_errors_for_both_rpcs() {
-    for (mode, stop_strings, code) in [
+    for (mode, output_text, code) in [
         (
             pb::OutputMode::Derender as i32,
-            vec![],
+            None,
             tonic::Code::Unimplemented,
         ),
-        (99, vec![], tonic::Code::InvalidArgument),
+        (99, None, tonic::Code::InvalidArgument),
+        (
+            pb::OutputMode::Text as i32,
+            Some(false),
+            tonic::Code::InvalidArgument,
+        ),
         (
             pb::OutputMode::Tokens as i32,
-            vec!["stop".to_string()],
+            Some(true),
             tonic::Code::InvalidArgument,
         ),
     ] {
@@ -1054,13 +1118,9 @@ async fn generate_output_mode_errors_for_both_rpcs() {
                 prompt: Some(pb::generate_request::Prompt::TokenIds(pb::TokenIds {
                     ids: vec![1, 2, 3],
                 })),
-                stopping: Some(pb::StoppingCriteria {
-                    stop_strings: stop_strings.clone(),
-                    ..Default::default()
-                }),
                 response: Some(pb::ResponseOptions {
                     output_mode: mode,
-                    output_text: Some(true),
+                    output_text,
                     ..Default::default()
                 }),
                 ..Default::default()

@@ -176,17 +176,21 @@ message ResponseOptions {
   bool prompt_logprobs = 2;
   optional CandidateTokens prompt_candidates = 3;
 
-  // Output options; output_text defaults to true. When false, the server does
-  // not detokenize, and stop_strings must be empty.
+  // Legacy output text flag, used when output_mode is UNSPECIFIED (default
+  // true). When false in that mode, the server does not detokenize and
+  // stop_strings must be empty. Explicit output_mode selects the behavior;
+  // an explicitly conflicting output_text value is rejected.
   optional bool output_text = 4;
   bool output_token_ids = 5;
   bool output_logprobs = 6;
   optional CandidateTokens output_candidates = 7;
   // Defaults to the model's generation config, else true, when omitted.
   optional bool skip_special_tokens = 8;
-  // Supersedes output_text when set. UNSPECIFIED uses output_text (default true).
+  // Selects the output behavior; UNSPECIFIED uses output_text (default true).
+  // Explicit TEXT/TOKENS with a conflicting output_text return INVALID_ARGUMENT.
   // TEXT requires a tokenizer; otherwise returns INVALID_ARGUMENT.
-  // TOKENS disables detokenization; output_token_ids still controls returned IDs.
+  // TOKENS omits text, detokenizing internally only to match stop strings
+  // (which require a tokenizer); output_token_ids still controls returned IDs.
   // DERENDER returns UNIMPLEMENTED; unknown enum values return INVALID_ARGUMENT.
   OutputMode output_mode = 9;
 }
