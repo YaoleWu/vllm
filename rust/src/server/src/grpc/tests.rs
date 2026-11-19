@@ -56,7 +56,7 @@ use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig, EngineId
 use vllm_llm::EngineCoreLlm;
 use vllm_metrics::METRICS;
 use vllm_text::tokenizer::DynTokenizer;
-use vllm_text::{Prompt, TextBackend, TextRequestProcessor};
+use vllm_text::{Prompt, SamplingHints, TextBackend, TextRequestProcessor};
 use vllm_tokenizer::test_utils::{PanickingTokenizer, TestTokenizer};
 use zeromq::prelude::{SocketRecv, SocketSend};
 use zeromq::{DealerSocket, PushSocket, ZmqMessage};
@@ -231,6 +231,7 @@ async fn recv_engine_message(dealer: &mut DealerSocket) -> Vec<bytes::Bytes> {
 struct FakeTextBackend {
     tokenizer: DynTokenizer,
     has_tokenizer: bool,
+    sampling_hints: SamplingHints,
 }
 
 impl Default for FakeTextBackend {
@@ -238,6 +239,7 @@ impl Default for FakeTextBackend {
         Self {
             tokenizer: Arc::new(TestTokenizer::new()),
             has_tokenizer: true,
+            sampling_hints: SamplingHints::default(),
         }
     }
 }
@@ -253,6 +255,10 @@ impl TextBackend for FakeTextBackend {
 
     fn model_id(&self) -> &str {
         "test-model"
+    }
+
+    fn sampling_hints(&self) -> vllm_text::Result<SamplingHints> {
+        Ok(self.sampling_hints.clone())
     }
 }
 
@@ -975,6 +981,7 @@ async fn generate_output_mode_on_tokenizerless_backend_for_both_rpcs() {
                     Arc::new(FakeTextBackend {
                         tokenizer: Arc::new(PanickingTokenizer),
                         has_tokenizer: false,
+                        ..Default::default()
                     }),
                     |_| {},
                 )
@@ -1086,7 +1093,7 @@ async fn unary_generate_prepares_multimodal_input_for_engine_core() {
                 let features = request.mm_features.as_ref().expect("multimodal features");
                 assert_eq!(features.len(), 2);
 
-                for (feature, identifier) in features.iter().zip(["image-1", "image-2"]) {
+                for (feature, identifier) in features.iter().zip(["uuid:image-1", "uuid:image-2"]) {
                     assert_eq!(feature.modality.as_str(), "image");
                     assert_eq!(feature.identifier, identifier);
                     assert!(feature.mm_position.length > 1);
@@ -1161,7 +1168,7 @@ async fn unary_generate_prepares_multimodal_input_for_engine_core() {
                 .collect(),
             kv: Some(pb::KvCacheParameters {
                 kv_transfer_params: Some(decode_kv_proto_struct()),
-                ec_transfer_params: Some(ec_proto_struct(&["image-2", "image-1"])),
+                ec_transfer_params: Some(ec_proto_struct(&["uuid:image-2", "uuid:image-1"])),
                 ..Default::default()
             }),
             stopping: Some(pb::StoppingCriteria {
@@ -1904,6 +1911,52 @@ async fn unary_generate_with_sampling_params() {
     // Verify the request was accepted and produced output.
     let outputs = response.outputs.expect("outputs present");
     assert_eq!(outputs.text, "hi");
+
+    engine_task.await.expect("mock engine task");
+    server_task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn unary_generate_without_temperature_uses_model_default() {
+    let (inference_service, control_service, engine_health, engine_task) =
+        setup_grpc_service_with_backend(
+            b"engine-grpc-default-temperature",
+            default_stream_output_specs(),
+            Arc::new(FakeTextBackend {
+                sampling_hints: SamplingHints {
+                    default_temperature: Some(0.6),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+            |request| {
+                let params = request.sampling_params.as_ref().expect("sampling params");
+                assert_eq!(params.temperature, 0.6);
+            },
+        )
+        .await;
+    let (channel, server_task) = start_grpc_test_server(
+        inference_service,
+        control_service,
+        engine_health,
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await;
+
+    InferenceClient::new(channel)
+        .generate(pb::GenerateRequest {
+            request_id: "test-default-temperature".to_string(),
+            model: "test-model".to_string(),
+            prompt: Some(pb::generate_request::Prompt::Text("test".to_string())),
+            stopping: Some(pb::StoppingCriteria {
+                max_new_tokens: 5,
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
+        .await
+        .expect("generate without temperature");
 
     engine_task.await.expect("mock engine task");
     server_task.abort();
@@ -3222,7 +3275,6 @@ fn render_state() -> RenderState {
         model: "Qwen/Qwen3-0.6B".to_string(),
         served_model_names: ServedModelNames::new(vec!["render-model".to_string()]),
         max_model_len: Some(1024),
-        max_n_sequences: crate::DEFAULT_MAX_N_SEQUENCES,
         text: TextRequestProcessor::new(backend.clone(), 1024),
         chat: ChatRequestProcessor::new(backend, None, None),
         lora_modules: Vec::new(),
@@ -3613,12 +3665,12 @@ async fn render_chat_returns_preprocessed_media_for_generate() {
     assert!(features.mm_hash.is_some());
 
     // The media decodes the way Inference.Generate decodes it.
-    let vllm_chat::multimodal::MultimodalInput::Preprocessed(decoded) =
-        super::media::from_proto(rendered.media, None).expect("decode media")
-    else {
-        panic!("expected preprocessed media");
-    };
-    assert!(decoded[0].data.is_some());
+    let decoded = super::media::from_proto(rendered.media, None).expect("decode media");
+    assert!(
+        !decoded.preprocessed.is_empty(),
+        "expected preprocessed media"
+    );
+    assert!(decoded.preprocessed[0].data.is_some());
 }
 
 #[tokio::test]
