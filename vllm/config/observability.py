@@ -103,7 +103,9 @@ class ObservabilityConfig:
     If set, vllm EngineCore will log iteration details
     This includes number of context/generation requests and tokens
     and, where the output worker measures it with CUDA events, the
-    elapsed GPU time for the iteration.
+    elapsed GPU time for the iteration and the actual target-model CUDA graph
+    dispatch mode and unpadded/padded token counts for real GPU batches.
+    No additional cudagraph metrics flag is needed for the per-iteration log.
 
     Stat loggers also receive two workload summaries, which are not printed
     in the log; read them in a custom stat logger. Each iteration record has

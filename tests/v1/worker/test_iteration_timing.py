@@ -8,6 +8,7 @@ import pytest
 
 import vllm.config.vllm as vllm_config_module
 import vllm.v1.worker.iteration_timing as iteration_timing
+from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.config import VllmConfig
 from vllm.v1.core.sched.output import IterationDetails
 from vllm.v1.executor.multiproc_executor import MultiprocExecutor
@@ -60,17 +61,24 @@ class FakeEvent:
 
 
 class FakeAsyncOutput(AsyncModelRunnerOutput):
+    def __init__(self, cudagraph_stats=None):
+        self.output = ModelRunnerOutput(req_ids=[], cudagraph_stats=cudagraph_stats)
+
     def get_output(self):
-        return ModelRunnerOutput(req_ids=[])
+        return self.output
 
     def get_kv_connector_output(self):
         return "kv output"
+
+    def get_cudagraph_stats(self):
+        return self.output.cudagraph_stats
 
 
 class FakeWorker:
     def __init__(self):
         self.iteration_timer = IterationTimer()
         self.fail_next_step = False
+        self.cudagraph_stats = None
 
     @start_iteration_timing
     def execute_model(self, scheduler_output):
@@ -81,7 +89,7 @@ class FakeWorker:
         if self.fail_next_step:
             self.fail_next_step = False
             return None  # as when execute_model failed
-        return FakeAsyncOutput()
+        return FakeAsyncOutput(self.cudagraph_stats)
 
     @time_dummy_batch
     def execute_dummy_batch(self):
@@ -133,6 +141,41 @@ def test_record_carries_the_scheduled_workload(gpu):
 
     assert step.scheduled_workload is workload
     assert dummy.is_dummy and dummy.scheduled_workload is None
+
+
+def test_delayed_records_carry_their_own_cudagraph_stats(gpu, monkeypatch):
+    worker = FakeWorker()
+    full = CUDAGraphStat(3, 4, 1, "FULL")
+    piecewise = CUDAGraphStat(5, 8, 3, "PIECEWISE")
+
+    worker.cudagraph_stats = full
+    assert worker.step(num_tokens=3) == []
+    worker.cudagraph_stats = piecewise
+    assert worker.step(num_tokens=5) == []
+    assert worker.execute_dummy_batch() == []
+    gpu.run()
+
+    # The following output carries timings for two earlier, different graphs.
+    worker.cudagraph_stats = CUDAGraphStat(1, 1, 0, "NONE")
+    first, second, dummy = worker.step()
+    assert first.cudagraph_stats == full
+    assert second.cudagraph_stats == piecewise
+    assert dummy.is_dummy and dummy.cudagraph_stats is None
+
+    info = Mock()
+    monkeypatch.setattr(loggers.logger, "info", info)
+    stat_logger = SimpleNamespace(
+        kv_cache_device="GPU", _log_prefix_for_engine=lambda engine_idx: ""
+    )
+    for record in (first, second, dummy):
+        loggers.LoggingStatLogger._log_iteration(
+            stat_logger, record, SchedulerStats(), 0
+        )
+    messages = [call.args[0] % call.args[1:] for call in info.call_args_list]
+    assert "CUDA graph mode: FULL, graph tokens (unpadded/padded): 3/4" in messages[0]
+    assert "CUDA graph mode: PIECEWISE" in messages[1]
+    assert "graph tokens (unpadded/padded): 5/8" in messages[1]
+    assert "CUDA graph mode:" not in messages[2]
 
 
 def test_dummy_batches_are_timed_and_return_earlier_records(gpu):

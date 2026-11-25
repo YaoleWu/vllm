@@ -176,6 +176,19 @@ Now the CLI is directly using the uppercase string of cudagraph_mode for compila
 vllm serve --model meta-llama/Llama-3.1-8B-Instruct --compilation-config '{"cudagraph_mode": "FULL_AND_PIECEWISE"}'
 ```
 
+### Observing per-iteration graph dispatch
+
+With `--enable-logging-iteration-details`, GPU-timed iteration records for
+real batches include the target model's dispatched CUDA graph runtime mode
+(`FULL`, `PIECEWISE`, or `NONE`) and the unpadded/padded token counts.
+These describe the same iteration as its elapsed GPU time, even when the
+timing is delivered by a later output. The graph token counts are worker-side
+dispatch counts, not the scheduler's prefill/decode token counts. Dummy or
+untimed iterations may have no graph metadata.
+
+This is independent of `--cudagraph-metrics`, which logs aggregate graph
+dispatch frequencies.
+
 ### Python examples
 
 ```python

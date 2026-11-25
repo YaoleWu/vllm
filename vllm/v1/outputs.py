@@ -387,6 +387,10 @@ class AsyncModelRunnerOutput(ABC):
         """
         pass
 
+    def get_cudagraph_stats(self) -> CUDAGraphStat | None:
+        """Get the CUDA graph dispatch metadata without waiting for GPU results."""
+        return None
+
 
 @dataclass(slots=True)
 class DraftTokenIds:

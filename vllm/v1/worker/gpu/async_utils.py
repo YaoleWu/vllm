@@ -22,6 +22,7 @@ from vllm.v1.worker.gpu.sample.output import SamplerOutput, SamplingMaskTensors
 from vllm.v1.worker.utils import raise_if_nan_logits
 
 if TYPE_CHECKING:
+    from vllm.compilation.cuda_graph import CUDAGraphStat
     from vllm.distributed.aux_output_connector.worker import PendingAuxOutput
     from vllm.v1.worker.gpu.input_batch import InputBatch
 
@@ -244,6 +245,9 @@ class AsyncOutput(AsyncModelRunnerOutput):
     def get_kv_connector_output(self) -> KVConnectorOutput | None:
         """Get the KV connector output for this async output."""
         return self.model_runner_output.kv_connector_output
+
+    def get_cudagraph_stats(self) -> "CUDAGraphStat | None":
+        return self.model_runner_output.cudagraph_stats
 
 
 class AsyncPoolingOutput(AsyncModelRunnerOutput):

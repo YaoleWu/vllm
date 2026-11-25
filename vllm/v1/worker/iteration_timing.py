@@ -32,6 +32,7 @@ from vllm.v1.metrics.stats import SchedulerIterationDetails
 from vllm.v1.outputs import AsyncModelRunnerOutput, ModelRunnerOutput
 
 if TYPE_CHECKING:
+    from vllm.compilation.cuda_graph import CUDAGraphStat
     from vllm.config import VllmConfig
     from vllm.v1.core.sched.output import SchedulerOutput
     from vllm.v1.outputs import KVConnectorOutput
@@ -66,6 +67,7 @@ class _TimedIteration:
     is_dummy: bool
     start: torch.Event
     end: torch.Event
+    cudagraph_stats: CUDAGraphStat | None
 
     def read(self) -> SchedulerIterationDetails:
         """Read the elapsed time. Both events must have completed."""
@@ -81,6 +83,7 @@ class _TimedIteration:
             num_encoder_output_tokens=details.num_encoder_output_tokens,
             is_dummy=self.is_dummy,
             scheduled_workload=details.scheduled_workload,
+            cudagraph_stats=self.cudagraph_stats,
         )
 
 
@@ -104,7 +107,7 @@ class IterationTimer:
             None if details is None else (details, is_dummy, _record_event())
         )
 
-    def finish(self) -> None:
+    def finish(self, cudagraph_stats: CUDAGraphStat | None = None) -> None:
         if self._started is None:
             return
         details, is_dummy, start = self._started
@@ -112,7 +115,9 @@ class IterationTimer:
         # An iteration whose timing failed keeps its index, so the gap shows.
         index, end = next(self._indices), _record_event()
         if start is not None and end is not None:
-            self._pending.append(_TimedIteration(index, details, is_dummy, start, end))
+            self._pending.append(
+                _TimedIteration(index, details, is_dummy, start, end, cudagraph_stats)
+            )
 
     def take_ready(self) -> list[SchedulerIterationDetails]:
         """Pop the oldest iterations whose GPU work has completed."""
@@ -145,6 +150,9 @@ class _WithIterationRecords(AsyncModelRunnerOutput):
     def get_kv_connector_output(self) -> KVConnectorOutput | None:
         return self._output.get_kv_connector_output()
 
+    def get_cudagraph_stats(self) -> CUDAGraphStat | None:
+        return self._output.get_cudagraph_stats()
+
 
 def start_iteration_timing(execute_model: Callable) -> Callable:
     """Decorates `Worker.execute_model` to record the iteration's start."""
@@ -172,7 +180,7 @@ def finish_iteration_timing(sample_tokens: Callable) -> Callable:
         # None when its execute_model failed.
         if timer is None or not isinstance(output, AsyncModelRunnerOutput):
             return output
-        timer.finish()
+        timer.finish(output.get_cudagraph_stats())
         records = timer.take_ready()
         return _WithIterationRecords(output, records) if records else output
 

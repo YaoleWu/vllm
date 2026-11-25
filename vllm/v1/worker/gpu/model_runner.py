@@ -1957,7 +1957,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if not dummy_run:
             # Common case.
             # Prepare all the inputs and copy to the input buffers.
-            if self.observability_config.cudagraph_metrics:
+            if self.observability_config.cudagraph_metrics or (
+                self.observability_config.enable_logging_iteration_details
+                and scheduler_output.iteration_details is not None
+            ):
                 cudagraph_stats = make_cudagraph_stats(batch_desc, num_toks)
             assert batch_req_state is not None
             input_batch = self.prepare_inputs(

@@ -205,11 +205,18 @@ class LoggingStatLogger(StatLoggerBase):
         elapsed_msg = ""
         if details.elapsed_ms is not None:
             elapsed_msg = f", iteration elapsed time: {details.elapsed_ms:.2f} ms"
+        graph_msg = ""
+        if (graph := details.cudagraph_stats) is not None:
+            graph_msg = (
+                f", CUDA graph mode: {graph.runtime_mode}, graph tokens "
+                f"(unpadded/padded): {graph.num_unpadded_tokens}/"
+                f"{graph.num_padded_tokens}"
+            )
 
         logger.info(
             "%sIteration(%d): %d context requests, %d context tokens, "
             "%d generation requests, %d generation tokens%s%s, "
-            "%s KV cache usage: %.1f%%%s",
+            "%s KV cache usage: %.1f%%%s%s",
             self._log_prefix_for_engine(engine_idx),
             details.iteration_index,
             details.num_ctx_requests,
@@ -221,6 +228,7 @@ class LoggingStatLogger(StatLoggerBase):
             self.kv_cache_device,
             scheduler_stats.kv_cache_usage * 100,
             encoder_msg,
+            graph_msg,
         )
 
     def record(

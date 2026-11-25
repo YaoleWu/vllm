@@ -211,6 +211,8 @@ class SchedulerIterationDetails:
     is_dummy: bool = False
     # Only with --enable-logging-iteration-details; None for dummy iterations.
     scheduled_workload: ScheduledWorkload | None = None
+    # Actual target-model dispatch on the output worker, if measured.
+    cudagraph_stats: CUDAGraphStat | None = None
 
 
 KV_FETCH_WAITING_TO_START = "waiting_to_start"

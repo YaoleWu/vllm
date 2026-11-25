@@ -2409,6 +2409,11 @@ class Scheduler(SchedulerInterface):
         kv_connector_output = model_runner_output.kv_connector_output
         ec_connector_output = model_runner_output.ec_connector_output
         cudagraph_stats = model_runner_output.cudagraph_stats
+        if (
+            cudagraph_stats is not None
+            and not self.observability_config.cudagraph_metrics
+        ):
+            cudagraph_stats = None
 
         # Every GPU write enqueued by this and earlier steps has completed, so it is
         # safe to return deferred-free blocks to the pool.
